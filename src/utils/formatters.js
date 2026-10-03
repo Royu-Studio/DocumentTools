@@ -1,4 +1,5 @@
 export const MAX_TEXT_LENGTH = 2 * 1024 * 1024
+const MAX_FORMATTED_LENGTH = 16 * 1024 * 1024
 
 export function checkText(source) {
   if (!source.trim()) throw new Error('请先输入内容或导入文件')
@@ -11,6 +12,11 @@ export function formatJson(source, indent = 2, compact = false) {
   // exponent notation and escape sequences must retain their original spelling.
   JSON.parse(source)
   const tokens = source.match(/"(?:[^"\\]|\\[\s\S])*"|[^\s"{}\[\],:]+|[{}\[\],:]/g) || []
+  let nesting = 0
+  for (const token of tokens) {
+    if (token === '{' || token === '[') { if (++nesting > 256) throw new Error('JSON 嵌套超过 256 层，请缩小后重试') }
+    else if (token === '}' || token === ']') nesting--
+  }
   if (compact) return tokens.join('')
   const unit = ' '.repeat(Number(indent))
   let depth = 0
@@ -28,6 +34,7 @@ export function formatJson(source, indent = 2, compact = false) {
     } else if (token === ',') result += ',\n' + unit.repeat(depth)
     else if (token === ':') result += ': '
     else result += token
+    if (result.length > MAX_FORMATTED_LENGTH) throw new Error('格式化结果超过 16 MB，请压缩或缩小内容后重试')
   })
   return result
 }
@@ -69,13 +76,32 @@ export function xmlTokens(source) {
 
 export function formatXml(source, indent = 2, compact = false) {
   checkText(source)
+  const tokens = xmlTokens(source)
+  // Reject external and recursive entity definitions before passing anything to
+  // the native parser. Simple internal literal entities remain backward compatible.
+  let lexicalDepth = 0
+  for (const token of tokens) {
+    if (/^<!DOCTYPE\b/.test(token)) {
+      const unsafeExternal = /^<!DOCTYPE\s+[^\s\[>]+\s+(?:SYSTEM|PUBLIC)\s/.test(token)
+        || /<!ENTITY\s+(?:%\s*)?[^\s]+\s+(?:SYSTEM|PUBLIC)\s/.test(token)
+      const definitions = [...token.matchAll(/<!ENTITY\s+([^\s]+)\s+(["'])([\s\S]*?)\2\s*>/g)]
+      if (unsafeExternal || /<!ENTITY\s+%|%\s*[\w:.-]+\s*;/.test(token)
+        || definitions.length > 100 || definitions.some(match => match[3].length > 4096 || /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[\da-fA-F]+);)/.test(match[3]))) {
+        throw new Error('为安全起见，不支持外部 DTD、外部实体、参数实体或嵌套实体')
+      }
+    }
+    if (/^<\//.test(token)) lexicalDepth--
+    else if (/^<[^!?/]/.test(token) && !/\/\s*>$/.test(token)) {
+      if (++lexicalDepth > 256) throw new Error('XML 嵌套超过 256 层，请缩小后重试')
+    }
+  }
   const parsed = new DOMParser().parseFromString(source, 'application/xml')
   const error = parsed.getElementsByTagNameNS('http://www.mozilla.org/newlayout/xml/parsererror.xml', 'parsererror')[0]
     || [...parsed.getElementsByTagNameNS('http://www.w3.org/1999/xhtml', 'parsererror')].find(node => node.textContent.startsWith('This page contains the following errors:'))
   if (error) throw new Error(error.textContent.replace(/Below is a rendering[\s\S]*/, '').trim())
   const root = { children: [] }
   const stack = [root]
-  for (const token of xmlTokens(source)) {
+  for (const token of tokens) {
     const parent = stack.at(-1)
     if (/^<\//.test(token)) { parent.close = token; stack.pop() }
     else if (/^<[^!?/]/.test(token)) {
@@ -83,7 +109,7 @@ export function formatXml(source, indent = 2, compact = false) {
       parent.children.push(node)
       if (!/\/\s*>$/.test(token)) stack.push(node)
     } else parent.children.push(token)
-    if (stack.length > 256) throw new Error('XML 嵌套超过 256 层，请缩小后重试')
+    if (stack.length > 257) throw new Error('XML 嵌套超过 256 层，请缩小后重试')
   }
   const raw = node => typeof node === 'string' ? node : node.open + node.children.map(raw).join('') + node.close
   function render(node, depth) {
@@ -95,8 +121,18 @@ export function formatXml(source, indent = 2, compact = false) {
     const children = node.children.filter(child => typeof child !== 'string' || child.trim())
     const separator = compact ? '' : '\n'
     const pad = level => compact ? '' : ' '.repeat(Number(indent) * level)
-    if (node === root) return children.map(child => render(child, 0)).join(separator)
-    return node.open + separator + children.map(child => pad(depth + 1) + render(child, depth + 1)).join(separator) + separator + pad(depth) + node.close
+    let result = node === root ? '' : node.open + separator
+    const append = text => {
+      if (result.length + text.length > MAX_FORMATTED_LENGTH) throw new Error('格式化结果超过 16 MB，请压缩或缩小内容后重试')
+      result += text
+    }
+    children.forEach((child, index) => {
+      if (index) append(separator)
+      if (node !== root) append(pad(depth + 1))
+      append(render(child, node === root ? 0 : depth + 1))
+    })
+    if (node !== root) append(separator + pad(depth) + node.close)
+    return result
   }
   return render(root, 0)
 }

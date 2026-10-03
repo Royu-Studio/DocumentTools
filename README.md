@@ -6,8 +6,8 @@
 - 分页与导出：PDF 保留全部页面，图片视为单页；两类文件均可导出完整 PDF 或当前页 PNG，各页独立保留图层和撤销记录。
 - 离线 OCR：图片/PDF 预览、整页与框选识别、中英文语言包、TXT 结果下载。
 - 导出 Word：PDF 和图片均可选择“导出 Word”，包含当前编辑，支持原生文字提取与扫描内容识别，并提供进度、取消和 DOCX 下载。
-- JSON 格式化：语法校验、缩进、压缩、导入、复制与下载，保留大整数、键顺序和原始转义。
-- XML 格式化：语法校验、缩进与压缩，保留混合文本、CDATA、注释和 `xml:space` 内容。
+- JSON 格式化：语法校验、缩进、压缩、导入、复制与下载，保留大整数、键顺序和原始转义；新增可展开的对象/数组检查器。
+- XML 格式化：语法校验、缩进与压缩，保留混合文本、CDATA、注释和 `xml:space` 内容；结构树显示属性、重复元素、文本及命名空间。
 
 文件处理、PDF 渲染、图片编辑和 OCR 都在浏览器本地完成。
 
@@ -22,7 +22,10 @@
 - PDF 和图片均默认使用移动工具，双指缩放取消尚未完成的误画；支持单指平移，桌面普通滚轮滚动，Ctrl/⌘＋滚轮缩放。
 - PDF 导出保留原始页面和文字层，将新增编辑作为透明图像叠加，支持旋转页和裁剪框。新增文字在 PDF 中属于图像标注；Word 导出通过 OCR 识别这些标注。
 - OCR 预览默认可滚动，点击“框选区域”后拖动选区；手机属性面板支持 Escape 关闭并恢复焦点。
-- JSON/XML 支持 2/4 空格缩进及 Ctrl/⌘＋Enter，手机可切换输入与结果面板。输入限 2 MB，XML 与格式化 JSON 的结构深度限 256 层；XML 压缩只移除结构间排版空白，下载统一为 UTF-8。
+- JSON/XML 支持 2/4 空格缩进及 Ctrl/⌘＋Enter，手机可切换输入与结果面板。输入限 2 MB，XML 与 JSON 的结构深度限 256 层；XML 压缩只移除结构间排版空白，下载统一为 UTF-8。
+- 格式化后可切换“树视图 / 文本”；选中节点后复制值、原始子树或定位路径，支持全部展开/折叠及方向键。字符串值解码，数字保持原始拼写，重复 JSON 键按 `#1/#2` 区分。XML 元素“复制值”补齐继承命名空间，“复制子树”保留原文。路径为检查器定位表示，不承诺是通用 JSONPath/XPath 表达式。
+- 树模型最多 100,000 节点，树列表每页最多 300 行；超过树限制时保留文本结果并显示原因。排版后文本最多 16 MB，可改用压缩。输入修改、导入、校验失败或清空时立即移除旧树。剪贴板不可用时提供选中的手动复制内容。
+- XML 不请求外部资源：外部 DTD、外部实体、参数实体、嵌套实体被拒绝；简单内部字面量实体仍可格式化为文本，但树视图不支持自定义实体，会明确提示。
 - 文件及编辑记录保存在当前浏览器会话内，刷新或关闭页面前请导出需要保留的结果。
 
 ## 开发
@@ -45,6 +48,17 @@ OCR 像素预处理回归测试：`node --test tests/ocrPixels.test.mjs`。
 
 Word 导出回归测试：`node --test tests/wordExport.test.mjs`。转换策略、保真范围和验证说明见 [PDF 转 Word](docs/pdf-to-word.md)。
 
-格式化回归测试：`node --test tests/formatters.test.mjs`。XML 原生解析器测试需启动开发服务，在浏览器控制台运行 `await (await import('/tests/formatters.browser.js')).testXmlFormatter()`。
+全量 Node 回归测试：`npm test`。格式化与树模型测试也可单独运行：`node --test tests/formatters.test.mjs tests/formatterTree.test.mjs`。
+
+原生浏览器解析器与界面回归：启动开发服务，在浏览器控制台分别运行：
+
+```js
+await (await import('/tests/formatters.browser.js')).testXmlFormatter()
+await (await import('/tests/formatterTree.browser.js')).testFormatterTree()
+await (await import('/tests/formatterInspector.browser.js')).testFormatterInspector()
+await (await import('/tests/formatterInspector.browser.js')).testXmlInspector()
+```
+
+界面测试使用隔离的 Vue 挂载点，并临时模拟剪贴板的成功/失败响应；最终会恢复剪贴板属性。实际系统剪贴板、桌面/移动布局仍需浏览器交互检查。
 
 界面及触摸已通过 Chrome 桌面和移动模拟检查；移动端文件保存/分享及 Safari 行为仍需实机验证。

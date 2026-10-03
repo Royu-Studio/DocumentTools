@@ -16,3 +16,11 @@ test('XML scanner keeps quoted brackets, DTD, CDATA and comments intact', () => 
   const source = '<!DOCTYPE r [<!ENTITY a "x>y">]><r attr="a>b"><![CDATA[a<b]]><!-- > --><x/>text</r>'
   assert.deepEqual(xmlTokens(source), ['<!DOCTYPE r [<!ENTITY a "x>y">]>', '<r attr="a>b">', '<![CDATA[a<b]]>', '<!-- > -->', '<x/>', 'text', '</r>'])
 })
+
+test('JSON depth limit also applies to compact mode and oversized pretty output is bounded', () => {
+  const deep = '['.repeat(257) + '0' + ']'.repeat(257)
+  assert.throws(() => formatJson(deep, 2, true), /256/)
+  const wideDeep = '['.repeat(255) + '[' + '0,'.repeat(17000) + '0]' + ']'.repeat(255)
+  assert.throws(() => formatJson(wideDeep, 4), /16 MB/)
+  assert.equal(formatJson(wideDeep, 4, true), wideDeep)
+})
