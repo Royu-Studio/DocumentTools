@@ -1,6 +1,5 @@
 <script setup>
-import { computed, markRaw, nextTick, onActivated, onBeforeUnmount, onMounted, ref, shallowReactive, shallowRef } from 'vue'
-import { onBeforeRouteLeave, useRoute } from 'vue-router'
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, shallowRef } from 'vue'
 import FileDropZone from '@/components/FileDropZone.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import PdfWordDialog from '@/components/PdfWordDialog.vue'
@@ -8,11 +7,11 @@ import ToolHeader from '@/components/ToolHeader.vue'
 import { validateFile } from '@/utils/files.js'
 import '@/assets/studio.css'
 
-const route = useRoute()
-const isVisible = computed(() => route.path === '/pdf')
+const props = defineProps({ active: { type: Boolean, default: true }, workspaceId: String, initialMode: { type: String, default: 'edit' } })
+const isVisible = computed(() => props.active)
 const documents = shallowReactive([])
 const activeId = ref(null)
-const mode = ref(useRoute().query.tool === 'ocr' ? 'ocr' : 'edit')
+const mode = ref(props.initialMode)
 const input = ref(null)
 const error = ref('')
 const busy = ref(false)
@@ -22,7 +21,8 @@ const readers = new Map()
 const ocrLoaded = new Map()
 const ocrComponent = shallowRef(null)
 const active = computed(() => documents.find(doc => doc.id === activeId.value))
-let sequence = 0
+let sequence = 0, disposed = false
+defineExpose({ hasContent: () => documents.length > 0 || busy.value, canDeactivate: () => !wordDialogOpen.value })
 
 async function openFile(file) {
   if (!file || busy.value || wordDialogOpen.value || (readers.get(activeId.value)?.isBusy || editors.get(activeId.value)?.isBusy)) return
@@ -35,11 +35,14 @@ async function openFile(file) {
   const desiredMode = mode.value
   try {
     doc.component = markRaw((await import('./DocumentEditor.vue')).default)
+    if (disposed) return
     documents.push(doc)
     activeId.value = doc.id
     mode.value = 'edit'
     await nextTick()
-    await editors.get(doc.id).load(file)
+    if (disposed) return
+    await editors.get(doc.id)?.load(file)
+    if (disposed) return
     if (desiredMode === 'ocr') await showOcr()
   } catch (reason) {
     const index = documents.indexOf(doc)
@@ -58,10 +61,13 @@ async function showOcr() {
   const revision = editor.revision()
   if (ocrLoaded.get(doc.id) !== revision) {
     const file = await editor.snapshot()
+    if (disposed) return
     if (!file) throw new Error('文件还未准备好，请稍后重试')
     if (!ocrComponent.value) ocrComponent.value = markRaw((await import('./OCRTool.vue')).default)
+    if (disposed) return
     mode.value = 'ocr'
     await nextTick()
+    if (disposed) return
     await readers.get(doc.id).load(file)
     ocrLoaded.set(doc.id, editor.revision())
   } else mode.value = 'ocr'
@@ -96,14 +102,7 @@ async function closeDocument(doc) {
 }
 function beforeUnload(event) { if (documents.length) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => window.addEventListener('beforeunload', beforeUnload))
-onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
-onActivated(() => nextTick(() => editors.get(activeId.value)?.fit()))
-onBeforeRouteLeave(() => {
-  if (busy.value || wordDialogOpen.value || (readers.get(activeId.value)?.isBusy || editors.get(activeId.value)?.isBusy)) {
-    error.value = '请等待当前处理完成，或关闭导出窗口后返回工具箱。'
-    return false
-  }
-})
+onBeforeUnmount(() => { disposed = true; window.removeEventListener('beforeunload', beforeUnload) })
 </script>
 
 <template>
@@ -128,7 +127,7 @@ onBeforeRouteLeave(() => {
         <div v-if="busy" class="studio-progress" role="status">正在准备文件，请稍候…</div>
         <main v-if="!active" class="studio-welcome">
           <div class="welcome-copy"><h1>PDF 与图片处理</h1></div>
-          <div class="welcome-upload"><FileDropZone title="拖入 PDF 或图片" hint="也可直接粘贴图片 · PDF ≤ 200 MB，图片 ≤ 100 MB" @file="openFile" @error="error = $event" /><div class="supported-types"><span>PDF</span><span>PNG</span><span>JPG</span><span>WEBP</span></div></div>
+          <div class="welcome-upload"><FileDropZone :active="isVisible" title="拖入 PDF 或图片" hint="也可直接粘贴图片 · PDF ≤ 200 MB，图片 ≤ 100 MB" @file="openFile" @error="error = $event" /><div class="supported-types"><span>PDF</span><span>PNG</span><span>JPG</span><span>WEBP</span></div></div>
           <div class="welcome-capabilities">
             <div><span class="capability-icon"><AppIcon name="edit" :size="23" /></span><strong>页面编辑</strong><p>PDF 和图片均可添加文字、涂抹、取色</p></div>
             <div><span class="capability-icon"><AppIcon name="stamp" :size="23" /></span><strong>添加印章</strong><p>两类文件共用印章及位置、大小调整</p></div>

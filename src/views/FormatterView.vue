@@ -1,10 +1,10 @@
 <script setup>
-import { computed, nextTick, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import FormatterTree from '@/components/FormatterTree.vue'
 import { buildJsonTree, buildXmlTree } from '@/utils/formatterTree.js'
 import ToolHeader from '@/components/ToolHeader.vue'
 import { formatJson, formatXml, MAX_TEXT_LENGTH } from '@/utils/formatters.js'
-const props = defineProps({ kind: { type: String, required: true } })
+const props = defineProps({ kind: { type: String, required: true }, workspaceId: { type: String, default: 'standalone' }, active: { type: Boolean, default: true }, initialMode: String })
 const source = ref('')
 const output = ref('')
 const error = ref('')
@@ -20,7 +20,16 @@ const stale = ref(false)
 const tree = shallowRef(null)
 const treeError = ref('')
 const resultMode = ref('tree')
-let revision = 0
+let revision = 0, disposed = false
+const downloadUrls = new Set(), downloadTimers = new Set()
+const labelPrefix = computed(() => `${props.kind}-${props.workspaceId}`)
+defineExpose({ hasContent: () => !!source.value || !!output.value || importing.value })
+onBeforeUnmount(() => {
+  disposed = true; revision++
+  for (const timer of downloadTimers) clearTimeout(timer)
+  for (const url of downloadUrls) URL.revokeObjectURL(url)
+  downloadTimers.clear(); downloadUrls.clear()
+})
 watch(source, () => { revision++; error.value = ''; status.value = ''; tree.value = null; treeError.value = ''; if (output.value) stale.value = true }, { flush: 'sync' })
 function run(compact = false) {
   revision++
@@ -39,24 +48,26 @@ async function importFile(file) {
   if (!file || importing.value) return
   if (file.size > MAX_TEXT_LENGTH) { tree.value = null; stale.value = true; error.value = '文件超过 2 MB，请缩小后重试'; return }
   importing.value = true; tree.value = null; stale.value = !!output.value; revision++
-  try { source.value = (await file.text()).replace(/^\uFEFF/, ''); fileName.value = file.name; pane.value = 'input' }
+  try { const text = await file.text(); if (disposed) return; source.value = text.replace(/^\uFEFF/, ''); fileName.value = file.name; pane.value = 'input' }
   catch (reason) { error.value = `读取失败：${reason.message}` }
   finally { importing.value = false }
 }
 async function copy() {
   const currentRevision = revision
-  try { await navigator.clipboard.writeText(output.value); if (currentRevision === revision) status.value = '已复制结果' }
-  catch { if (currentRevision !== revision) return; resultMode.value = 'text'; await nextTick(); outputArea.value?.focus(); outputArea.value?.select(); status.value = '无法访问剪贴板，已选中结果，请手动复制' }
+  try { await navigator.clipboard.writeText(output.value); if (!disposed && currentRevision === revision) status.value = '已复制结果' }
+  catch { if (disposed || !props.active || currentRevision !== revision) return; resultMode.value = 'text'; await nextTick(); outputArea.value?.focus(); outputArea.value?.select(); status.value = '无法访问剪贴板，已选中结果，请手动复制' }
 }
 function download() {
   const text = props.kind === 'xml' ? output.value.replace(/^(<\?xml\s[^?]*encoding\s*=\s*['"])[^'"]+(['"])/i, '$1UTF-8$2') : output.value
   const blob = new Blob([text], { type: props.kind === 'json' ? 'application/json;charset=utf-8' : 'application/xml;charset=utf-8' })
   const url = URL.createObjectURL(blob)
+  downloadUrls.add(url)
   const link = document.createElement('a')
   link.href = url
   link.download = (fileName.value.replace(/\.[^.]+$/, '') || 'formatted') + '.' + props.kind
   link.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  const timer = setTimeout(() => { URL.revokeObjectURL(url); downloadUrls.delete(url); downloadTimers.delete(timer) }, 1000)
+  downloadTimers.add(timer)
   status.value = '已开始下载'
 }
 function example() {
@@ -82,8 +93,8 @@ function example() {
       <div class="formatter-feedback" role="status">{{ stale && output ? '输入已更改或校验失败，请重新格式化后复制或下载。' : status || '支持 Ctrl / ⌘ + Enter · 最大 2 MB' }}</div>
       <nav class="formatter-pane-switch" aria-label="切换编辑面板"><button :aria-pressed="pane === 'input'" @click="pane = 'input'">输入</button><button :aria-pressed="pane === 'output'" @click="pane = 'output'">结果</button></nav>
       <div class="formatter-editors" :data-pane="pane">
-        <section class="formatter-editor source-editor" @dragover.prevent @drop.prevent="importFile($event.dataTransfer.files?.[0])"><header><label :id="`${kind}-source-label`">输入 <small>{{ source.length.toLocaleString() }} 字符</small></label><span class="editor-file" :title="fileName">{{ fileName }}</span></header><textarea v-model="source" :aria-labelledby="`${kind}-source-label`" :placeholder="`在这里粘贴 ${kind.toUpperCase()}…`" :disabled="importing" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></section>
-        <section class="formatter-editor result-editor"><header><label :id="`${kind}-result-label`">结果 <small>{{ output.length.toLocaleString() }} 字符</small></label><div><button class="text-button" :disabled="!output || stale" @click="copy">复制</button><button class="text-button" :disabled="!output || stale" @click="download">下载</button></div></header><div class="formatter-result-switch" aria-label="结果展示方式"><button :aria-pressed="resultMode === 'tree'" @click="resultMode = 'tree'">树视图</button><button :aria-pressed="resultMode === 'text'" @click="resultMode = 'text'">文本</button></div><FormatterTree v-if="tree && !stale" v-show="resultMode === 'tree'" :tree="tree" /><div v-if="resultMode === 'tree' && (!tree || stale)" class="formatter-tree-empty">{{ stale ? '输入已更改，请重新格式化以查看结构树。' : treeError || '格式化后可展开节点、查看与复制值。' }}</div><textarea v-show="resultMode === 'text'" ref="outputArea" :value="output" :aria-labelledby="`${kind}-result-label`" readonly placeholder="格式化结果将显示在这里" spellcheck="false" wrap="off"></textarea></section>
+        <section class="formatter-editor source-editor" @dragover.prevent @drop.prevent="importFile($event.dataTransfer.files?.[0])"><header><label :id="`${labelPrefix}-source-label`">输入 <small>{{ source.length.toLocaleString() }} 字符</small></label><span class="editor-file" :title="fileName">{{ fileName }}</span></header><textarea v-model="source" :aria-labelledby="`${labelPrefix}-source-label`" :placeholder="`在这里粘贴 ${kind.toUpperCase()}…`" :disabled="importing" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></section>
+        <section class="formatter-editor result-editor"><header><label :id="`${labelPrefix}-result-label`">结果 <small>{{ output.length.toLocaleString() }} 字符</small></label><div><button class="text-button" :disabled="!output || stale" @click="copy">复制</button><button class="text-button" :disabled="!output || stale" @click="download">下载</button></div></header><div class="formatter-result-switch" aria-label="结果展示方式"><button :aria-pressed="resultMode === 'tree'" @click="resultMode = 'tree'">树视图</button><button :aria-pressed="resultMode === 'text'" @click="resultMode = 'text'">文本</button></div><FormatterTree v-if="tree && !stale" v-show="resultMode === 'tree'" :tree="tree" /><div v-if="resultMode === 'tree' && (!tree || stale)" class="formatter-tree-empty">{{ stale ? '输入已更改，请重新格式化以查看结构树。' : treeError || '格式化后可展开节点、查看与复制值。' }}</div><textarea v-show="resultMode === 'text'" ref="outputArea" :value="output" :aria-labelledby="`${labelPrefix}-result-label`" readonly placeholder="格式化结果将显示在这里" spellcheck="false" wrap="off"></textarea></section>
       </div>
       <p v-if="treeError" class="formatter-error" role="status">{{ treeError }}</p>
       <p class="formatter-note">{{ kind === 'json' ? '保留原始数字精度、键顺序与转义内容。' : '保留混合文本、CDATA 与 xml:space 内容；压缩仅移除结构间的排版空白。' }} 离开工具后内容暂存，刷新页面将清空。</p>

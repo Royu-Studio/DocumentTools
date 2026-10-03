@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { validateFile } from '@/utils/files.js'
 
 const props = defineProps({
+  active: { type: Boolean, default: true },
   accept: { type: String, default: '.pdf,image/*' },
   allow: { type: Array, default: () => ['pdf', 'image'] },
   maxSize: { type: Number, default: undefined },
@@ -17,10 +18,12 @@ const dragging = ref(false)
 const classes = computed(() => ({ compact: props.compact, dragging: dragging.value }))
 
 function pick() {
+  if (!props.active) return
   input.value?.click()
 }
 
 function acceptFile(file) {
+  if (!props.active) return
   const result = validateFile(file, { allow: props.allow, maxSize: props.maxSize })
   if (!result.valid) {
     emit('error', result.message)
@@ -40,13 +43,14 @@ function onDrop(event) {
 }
 
 function onPaste(event) {
-  if (!zone.value?.isConnected || !zone.value.getClientRects().length || ['INPUT', 'TEXTAREA'].includes(event.target?.tagName) || event.target?.isContentEditable) return
+  if (!props.active || !zone.value?.isConnected || !zone.value.getClientRects().length || ['INPUT', 'TEXTAREA'].includes(event.target?.tagName) || event.target?.isContentEditable) return
   const file = [...(event.clipboardData?.files || [])].find((item) => item.type.startsWith('image/'))
   if (file && props.allow.includes('image')) acceptFile(file)
 }
 
 onMounted(() => window.addEventListener('paste', onPaste))
 onBeforeUnmount(() => window.removeEventListener('paste', onPaste))
+watch(() => props.active, active => { if (!active) dragging.value = false })
 </script>
 
 <template>
@@ -55,13 +59,14 @@ onBeforeUnmount(() => window.removeEventListener('paste', onPaste))
     class="file-drop-zone"
     :class="classes"
     role="button"
-    tabindex="0"
+    :tabindex="active ? 0 : -1"
+    :aria-disabled="!active"
     aria-label="选择或拖入文件"
     @click="pick"
     @keydown.enter.prevent="pick"
     @keydown.space.prevent="pick"
-    @dragenter.prevent="dragging = true"
-    @dragover.prevent="dragging = true"
+    @dragenter.prevent="dragging = active"
+    @dragover.prevent="dragging = active"
     @dragleave.prevent="dragging = false"
     @drop.prevent="onDrop"
   >

@@ -29,9 +29,13 @@ const thumbnails = ref([])
 const backgroundThumbnail = ref('')
 const pageStates = new Map()
 const pageHistories = new Map()
-const thumbnailTasks = new Set()
+const thumbnailTasks = new Map()
+const pendingImageLoads = new Set()
+const pendingStampUrls = new Set()
 let thumbnailObserver
 let disposed = false
+let documentGeneration = 0
+let pendingFit = false
 const revisionNumber = ref(0)
 const stamp = ref(null)
 const stampInput = ref(null)
@@ -131,10 +135,12 @@ function restorePage() {
 }
 
 async function loadFile(file) {
+  if (disposed) throw cancelledError()
   const validation = validateFile(file)
   if (!validation.valid) throw new Error(validation.message)
+  const generation = ++documentGeneration
   await cleanupDocument()
-  disposed = false
+  assertCurrentDocument(generation)
   loading.value = true
   error.value = ''
   status.value = '正在读取文件…'
@@ -146,13 +152,19 @@ async function loadFile(file) {
   pageStates.clear()
   pageHistories.clear()
   revisionNumber.value = 0
-  workspace.setCurrentFileName(file.name)
+  if (!props.embedded && props.active) workspace.setCurrentFileName(file.name)
   try {
     if (validation.kind === 'pdf') {
       const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+      assertCurrentDocument(generation)
       configurePdfJsWorker(pdfjs)
-      pdfLoadingTask.value = pdfjs.getDocument({ data: await file.arrayBuffer() })
-      pdfDocument.value = await pdfLoadingTask.value.promise
+      const data = await file.arrayBuffer()
+      assertCurrentDocument(generation)
+      const task = pdfjs.getDocument({ data })
+      pdfLoadingTask.value = task
+      const pdf = await task.promise
+      assertCurrentDocument(generation)
+      pdfDocument.value = pdf
       pageCount.value = pdfDocument.value.numPages
       thumbnailObserver = new IntersectionObserver(entries => {
         for (const entry of entries) if (entry.isIntersecting) {
@@ -160,50 +172,80 @@ async function loadFile(file) {
           thumbnailObserver?.unobserve(entry.target)
         }
       }, { rootMargin: '300px' })
-      await renderPdfPage()
+      await renderPdfPage(generation)
     } else {
       sourceUrl.value = URL.createObjectURL(file)
-      const image = new Image()
-      image.decoding = 'async'
-      await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = sourceUrl.value })
+      const image = await loadImage(sourceUrl.value)
+      assertCurrentDocument(generation)
       sourceImage.value = image
       pageWidth.value = image.naturalWidth
       pageHeight.value = image.naturalHeight
     }
     restorePage()
     await nextTick()
+    assertCurrentDocument(generation)
     setupCanvas()
+    pendingFit = true
     fitToWindow()
     updateThumbnail()
     status.value = '文件已就绪。文字、涂抹、取色和印章均可用于当前页面。'
   } catch (reason) {
+    if (!isCurrentDocument(generation)) throw cancelledError()
     documentFile.value = null
     sourceImage.value = null
-    workspace.setCurrentFileName('')
+    if (!props.embedded && props.active) workspace.setCurrentFileName('')
     await cleanupDocument()
     throw new Error(`文件无法读取，可能已损坏、受密码保护或格式不支持：${reason.message}`)
-  } finally { loading.value = false }
+  } finally { if (isCurrentDocument(generation)) loading.value = false }
 }
 
-async function renderPdfPage() {
+function cancelledError() { return new DOMException('文件处理已取消', 'AbortError') }
+function isCurrentDocument(generation) { return !disposed && generation === documentGeneration }
+function assertCurrentDocument(generation) { if (!isCurrentDocument(generation)) throw cancelledError() }
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.decoding = 'async'
+    const finish = (error) => {
+      pendingImageLoads.delete(cancel)
+      image.onload = image.onerror = null
+      if (error) { image.src = ''; reject(error) } else resolve(image)
+    }
+    const cancel = () => finish(cancelledError())
+    pendingImageLoads.add(cancel)
+    image.onload = () => finish()
+    image.onerror = () => finish(new Error('图片无法读取'))
+    image.src = url
+  })
+}
+
+async function renderPdfPage(generation = documentGeneration) {
+  assertCurrentDocument(generation)
   const page = await pdfDocument.value.getPage(currentPage.value + 1)
+  assertCurrentDocument(generation)
   const original = page.getViewport({ scale: 1 })
   const scale = Math.min(1.5, 8192 / Math.max(original.width, original.height), Math.sqrt(16000000 / (original.width * original.height)))
   const viewport = page.getViewport({ scale })
   const surface = document.createElement('canvas')
   surface.width = Math.ceil(viewport.width)
   surface.height = Math.ceil(viewport.height)
-  renderTask.value = page.render({ canvasContext: surface.getContext('2d', { alpha: false }), viewport })
-  await renderTask.value.promise
-  renderTask.value = null
-  if (disposed) return
+  const task = page.render({ canvasContext: surface.getContext('2d', { alpha: false }), viewport })
+  renderTask.value = task
+  try {
+    await task.promise
+    assertCurrentDocument(generation)
+  } catch (reason) {
+    surface.width = surface.height = 1
+    throw reason
+  } finally { if (renderTask.value === task) renderTask.value = null }
   sourceImage.value = surface
   pageWidth.value = surface.width
   pageHeight.value = surface.height
 }
 
 async function selectPage(index) {
-  if (index === currentPage.value || isBusy.value) return
+  if (!props.active || disposed || index === currentPage.value || isBusy.value) return
+  const generation = documentGeneration
   confirmText()
   savePage()
   const previous = currentPage.value
@@ -211,18 +253,22 @@ async function selectPage(index) {
   error.value = ''
   currentPage.value = index
   try {
-    await renderPdfPage()
+    await renderPdfPage(generation)
+    assertCurrentDocument(generation)
     restorePage()
     await nextTick()
+    assertCurrentDocument(generation)
     setupCanvas()
+    pendingFit = true
     fitToWindow()
     updateThumbnail()
     viewportEl.value.scrollTop = 0
     viewportEl.value.scrollLeft = 0
   } catch (reason) {
+    if (!isCurrentDocument(generation)) return
     currentPage.value = previous
     showError(`页面读取失败：${reason.message}`)
-  } finally { loading.value = false }
+  } finally { if (isCurrentDocument(generation)) loading.value = false }
 }
 
 function setThumbnailRef(element, index) {
@@ -232,18 +278,27 @@ function setThumbnailRef(element, index) {
 }
 async function ensureThumbnail(index) {
   const pdf = pdfDocument.value
-  if (!pdf || thumbnails.value[index] || thumbnailTasks.has(index)) return
-  thumbnailTasks.add(index)
+  if (disposed || !pdf || thumbnails.value[index] || thumbnailTasks.has(index)) return
+  const generation = documentGeneration
+  const pending = { render: null }
+  thumbnailTasks.set(index, pending)
+  let surface
   try {
     const page = await pdf.getPage(index + 1)
+    assertCurrentDocument(generation)
     const viewport = page.getViewport({ scale: .18 })
-    const surface = document.createElement('canvas')
+    surface = document.createElement('canvas')
     surface.width = Math.ceil(viewport.width)
     surface.height = Math.ceil(viewport.height)
-    await page.render({ canvasContext: surface.getContext('2d'), viewport }).promise
-    if (pdf === pdfDocument.value && !thumbnails.value[index]) thumbnails.value[index] = surface.toDataURL('image/jpeg', .75)
+    pending.render = page.render({ canvasContext: surface.getContext('2d'), viewport })
+    await pending.render.promise
+    assertCurrentDocument(generation)
+    if (!thumbnails.value[index]) thumbnails.value[index] = surface.toDataURL('image/jpeg', .75)
   } catch { /* The page remains accessible even if its thumbnail fails. */ }
-  finally { thumbnailTasks.delete(index) }
+  finally {
+    if (surface) surface.width = surface.height = 1
+    if (thumbnailTasks.get(index) === pending) thumbnailTasks.delete(index)
+  }
 }
 function updateThumbnail() {
   if (!canvas.value || !sourceImage.value) return
@@ -259,20 +314,29 @@ function updateThumbnail() {
 async function cleanupDocument() {
   thumbnailObserver?.disconnect()
   thumbnailObserver = null
+  for (const task of thumbnailTasks.values()) task.render?.cancel()
   thumbnailTasks.clear()
+  for (const cancel of pendingImageLoads) cancel()
   renderTask.value?.cancel()
   renderTask.value = null
-  try { await pdfLoadingTask.value?.destroy() } catch { /* Already destroyed. */ }
+  // Detach synchronously: an older destroy() must never erase a newer load.
+  const loadingTask = pdfLoadingTask.value
   pdfLoadingTask.value = null
   pdfDocument.value = null
   thumbnails.value = []
   revokeImageUrl()
   for (const asset of stampAssets.values()) URL.revokeObjectURL(asset.url)
+  for (const url of pendingStampUrls) URL.revokeObjectURL(url)
+  pendingStampUrls.clear()
   stampAssets.clear()
   stampAssetId.value = null
   clearDownload()
   sourceImage.value = null
+  backgroundThumbnail.value = ''
+  pageStates.clear()
+  pageHistories.clear()
   if (canvas.value) { canvas.value.width = 1; canvas.value.height = 1 }
+  try { await loadingTask?.destroy() } catch { /* Already destroyed. */ }
 }
 
 function drawAnnotations(context, state) {
@@ -413,7 +477,7 @@ function startPointer(event) {
       selectedTextIndex.value = null
       textDraft.value = ''
       inputPosition.value = { ...point, fontSize: 24 }
-      nextTick(() => textInput.value?.focus())
+      nextTick(() => { if (props.active && !disposed) textInput.value?.focus() })
     }
   }
   event.currentTarget.setPointerCapture?.(event.pointerId)
@@ -421,6 +485,7 @@ function startPointer(event) {
 }
 
 function movePointer(event) {
+  if (!props.active || disposed) return
   if (activePointers.has(event.pointerId)) activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (activePointers.size === 2 && interaction.value?.type === 'pinch') {
     event.preventDefault()
@@ -463,6 +528,7 @@ function movePointer(event) {
 }
 
 function endPointer(event) {
+  if (!props.active || disposed) return
   activePointers.delete(event.pointerId)
   const state = interaction.value
   if (state?.pointerId === event.pointerId && ['brush', 'text-drag', 'stamp-drag', 'stamp-resize'].includes(state.type)) {
@@ -488,17 +554,20 @@ function selectTool(tool) {
 }
 
 async function acceptStamp(file) {
-  if (!file || isBusy.value) return
+  if (!props.active || disposed || !file || isBusy.value) return
+  const generation = documentGeneration
   const validation = validateFile(file, { allow: ['image'] })
   if (!validation.valid) return showError(validation.message)
   if (!['image/png', 'image/jpeg'].includes(file.type)) return showError('印章支持 PNG 或 JPG 图片。')
   loading.value = true
   const url = URL.createObjectURL(file)
+  pendingStampUrls.add(url)
   try {
-    const image = new Image()
-    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url })
+    const image = await loadImage(url)
+    assertCurrentDocument(generation)
     const id = ++stampSequence
     stampAssets.set(id, { image, url })
+    pendingStampUrls.delete(url)
     stampAssetId.value = id
     activeTool.value = 'stamp'
     colorPicker.value = false
@@ -506,8 +575,10 @@ async function acceptStamp(file) {
     selectedTextIndex.value = null
     placeStamp()
     error.value = ''
-  } catch { URL.revokeObjectURL(url); showError('印章图片无法读取，请重新选择。') }
-  finally { loading.value = false }
+  } catch {
+    if (pendingStampUrls.delete(url)) URL.revokeObjectURL(url)
+    if (isCurrentDocument(generation)) showError('印章图片无法读取，请重新选择。')
+  } finally { if (isCurrentDocument(generation)) loading.value = false }
 }
 function placeStamp(point = { x: pageWidth.value / 2, y: pageHeight.value / 2 }) {
   const asset = stampAssets.get(stampAssetId.value)
@@ -520,7 +591,7 @@ function placeStamp(point = { x: pageWidth.value / 2, y: pageHeight.value / 2 })
   commit()
 }
 function startStampResize(event) {
-  if (!stamp.value || isBusy.value) return
+  if (!props.active || disposed || !stamp.value || isBusy.value) return
   if (event.pointerType === 'touch') activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   event.currentTarget.setPointerCapture?.(event.pointerId)
   event.preventDefault()
@@ -618,28 +689,32 @@ function resetEditor() {
 }
 
 function scheduleRender() {
-  if (raf.value) return
+  if (disposed || raf.value) return
   raf.value = requestAnimationFrame(() => { raf.value = 0; renderCanvas() })
 }
 function setZoom(value) { zoom.value = clamp(value, 0.1, 4) }
 function fitToWindow() {
-  if (!viewportEl.value || !hasFile.value) return
+  if (disposed || !props.active || !viewportEl.value || !hasFile.value) return
   const { clientWidth, clientHeight } = viewportEl.value
+  if (!clientWidth || !clientHeight) return
   setZoom(Math.min((clientWidth - 48) / pageWidth.value, (clientHeight - 48) / pageHeight.value, 1.5))
+  pendingFit = false
 }
 function handleWheel(event) {
-  if (!event.ctrlKey && !event.metaKey) return
+  if (!props.active || disposed || (!event.ctrlKey && !event.metaKey)) return
   event.preventDefault()
   zoomAt(viewportEl.value, canvas.value, zoom, clamp(zoom.value * (event.deltaY > 0 ? 0.9 : 1.1), 0.1, 4), { x: event.clientX, y: event.clientY })
 }
 
 async function exportDocument() {
-  if (!canvas.value || isBusy.value) return
+  if (!props.active || disposed || !canvas.value || isBusy.value) return
+  const generation = documentGeneration
   exporting.value = true
   error.value = ''
   try {
     const format = exportFormat.value
     const blob = format === 'pdf' ? await getPdfSnapshot() : await getImageSnapshot()
+    assertCurrentDocument(generation)
     clearDownload()
     downloadUrl.value = URL.createObjectURL(blob)
     downloadName.value = safeDownloadName(documentFile.value.name, format === 'png' && pageCount.value > 1 ? `第${currentPage.value + 1}页` : '已编辑', format)
@@ -651,16 +726,17 @@ async function exportDocument() {
     link.click()
     status.value = `${format === 'pdf' ? `PDF 已生成，共 ${pageCount.value} 页` : '当前页 PNG 已生成'}。如未自动下载，请点击“保存文件”。`
   } catch (reason) {
-    showError(`导出失败：${reason.message}`)
-  } finally { exporting.value = false }
+    if (isCurrentDocument(generation)) showError(`导出失败：${reason.message}`)
+  } finally { if (isCurrentDocument(generation)) exporting.value = false }
 }
 
 function handleDrop(event) {
+  if (!props.active || disposed) return
   if (props.embedded) { showError('请使用顶部“打开文件”，新图片会保留为独立标签。'); return }
   const file = event.dataTransfer?.files?.[0]
   if (file) loadFile(file).catch(reason => showError(reason.message))
 }
-function showError(message) { error.value = message; status.value = message }
+function showError(message) { if (!disposed) { error.value = message; status.value = message } }
 function clamp(value, min, max) { return Math.min(max, Math.max(min, value)) }
 function rgbToHex(red, green, blue) { return `#${[red, green, blue].map((value) => value.toString(16).padStart(2, '0')).join('')}` }
 function isTypingTarget(target) { return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable }
@@ -675,13 +751,13 @@ function onKeydown(event) {
   else if ((event.key === 'Delete' || event.key === 'Backspace') && activeTool.value === 'stamp' && stamp.value) { event.preventDefault(); removeStamp() }
   else if (event.key === 'Escape') { cancelText(); selectedTextIndex.value = null; interaction.value = null }
 }
-function onKeyup(event) { if (event.code === 'Space') spacePressed.value = false }
+function onKeyup(event) { if (props.active && event.code === 'Space') spacePressed.value = false }
 function revokeImageUrl() { if (sourceUrl.value) { URL.revokeObjectURL(sourceUrl.value); sourceUrl.value = '' } }
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('keyup', onKeyup)
-  const staged = workspace.takeFile('image') || workspace.takeFile('pdf')
+  const staged = !props.embedded && props.active && (workspace.takeFile('image') || workspace.takeFile('pdf'))
   if (staged) try { await loadFile(staged) } catch (reason) { showError(reason.message) }
 })
 onBeforeUnmount(() => {
@@ -689,35 +765,65 @@ onBeforeUnmount(() => {
   window.removeEventListener('keyup', onKeyup)
   if (raf.value) cancelAnimationFrame(raf.value)
   disposed = true
+  documentGeneration++
   void cleanupDocument()
 })
 watch(() => props.active, active => {
-  if (!active) { activePointers.clear(); interaction.value = null; spacePressed.value = false }
-})
+  if (!active) {
+    const state = interaction.value
+    if (state?.type === 'brush') strokes.value.pop()
+    else if (state?.type === 'text-drag' && selectedText.value) Object.assign(selectedText.value, state.original)
+    else if (state?.type?.startsWith('stamp-')) stamp.value = state.original
+    activePointers.clear()
+    interaction.value = null
+    spacePressed.value = false
+    composing.value = false
+    renderCanvas()
+  } else if (documentFile.value) {
+    if (!props.embedded) workspace.setCurrentFileName(documentFile.value.name)
+    if (pendingFit) nextTick(() => fitToWindow())
+  }
+}, { flush: 'sync' })
 async function getImageSnapshot() {
-  if (!canvas.value || !sourceImage.value) return null
+  if (disposed || !canvas.value || !sourceImage.value) return null
+  const generation = documentGeneration
+  const file = documentFile.value
   if (inputPosition.value) confirmText()
   renderCanvas()
   const blob = await new Promise((resolve, reject) => canvas.value.toBlob(value => value ? resolve(value) : reject(new Error('图片编码失败')), 'image/png'))
-  return new File([blob], documentFile.value.name.replace(/\.[^.]+$/, '') + '.png', { type: 'image/png' })
+  assertCurrentDocument(generation)
+  return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.png', { type: 'image/png' })
 }
 async function getPdfSnapshot() {
-  if (!sourceImage.value) return null
+  if (disposed || !sourceImage.value) return null
+  const generation = documentGeneration
+  const file = documentFile.value
   confirmText()
   savePage()
   const { PDFDocument, degrees } = await import('@pdfme/pdf-lib')
+  assertCurrentDocument(generation)
   if (fileKind.value !== 'pdf') {
     const imageFile = await getImageSnapshot()
+    assertCurrentDocument(generation)
     const output = await PDFDocument.create()
-    const image = await output.embedPng(await imageFile.arrayBuffer())
+    assertCurrentDocument(generation)
+    const bytes = await imageFile.arrayBuffer()
+    assertCurrentDocument(generation)
+    const image = await output.embedPng(bytes)
+    assertCurrentDocument(generation)
     const scale = Math.min(.75, 14400 / Math.max(pageWidth.value, pageHeight.value))
     const page = output.addPage([pageWidth.value * scale, pageHeight.value * scale])
     page.drawImage(image, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() })
-    return new File([await output.save()], documentFile.value.name.replace(/\.[^.]+$/, '') + '.pdf', { type: 'application/pdf' })
+    const result = await output.save()
+    assertCurrentDocument(generation)
+    return new File([result], file.name.replace(/\.[^.]+$/, '') + '.pdf', { type: 'application/pdf' })
   }
   const edits = [...pageStates.entries()].filter(([, state]) => state.texts.length || state.strokes.length || state.stamp)
-  if (!edits.length) return documentFile.value
-  const output = await PDFDocument.load(await documentFile.value.arrayBuffer())
+  if (!edits.length) return file
+  const bytes = await file.arrayBuffer()
+  assertCurrentDocument(generation)
+  const output = await PDFDocument.load(bytes)
+  assertCurrentDocument(generation)
   for (const [index, state] of edits) {
     const surface = document.createElement('canvas')
     // Render added text/stamps above preview resolution without rasterizing the
@@ -728,15 +834,22 @@ async function getPdfSnapshot() {
     const context = surface.getContext('2d')
     context.scale(surface.width / state.width, surface.height / state.height)
     drawAnnotations(context, state)
-    const overlay = await new Promise((resolve, reject) => surface.toBlob(blob => blob ? resolve(blob) : reject(new Error('页面编码失败')), 'image/png'))
-    const image = await output.embedPng(await overlay.arrayBuffer())
-    const source = await pdfDocument.value.getPage(index + 1)
-    const { angle, ...placement } = pdfOverlayPlacement(source.getViewport({ scale: 1 }))
-    output.getPage(index).drawImage(image, { ...placement, rotate: degrees(angle) })
-    surface.width = 1
-    surface.height = 1
+    try {
+      const overlay = await new Promise((resolve, reject) => surface.toBlob(blob => blob ? resolve(blob) : reject(new Error('页面编码失败')), 'image/png'))
+      assertCurrentDocument(generation)
+      const overlayBytes = await overlay.arrayBuffer()
+      assertCurrentDocument(generation)
+      const image = await output.embedPng(overlayBytes)
+      assertCurrentDocument(generation)
+      const source = await pdfDocument.value.getPage(index + 1)
+      assertCurrentDocument(generation)
+      const { angle, ...placement } = pdfOverlayPlacement(source.getViewport({ scale: 1 }))
+      output.getPage(index).drawImage(image, { ...placement, rotate: degrees(angle) })
+    } finally { surface.width = surface.height = 1 }
   }
-  return new File([await output.save()], documentFile.value.name, { type: 'application/pdf' })
+  const result = await output.save()
+  assertCurrentDocument(generation)
+  return new File([result], file.name, { type: 'application/pdf' })
 }
 function wordProtectedRegions() {
   savePage()
@@ -746,7 +859,7 @@ defineExpose({ isBusy, load: loadFile, snapshot: () => fileKind.value === 'pdf' 
 </script>
 
 <template>
-  <WorkspaceLayout :embedded="embedded" :title="documentFile?.name || '文档编辑工作台'" :subtitle="fileSummary" :has-file="hasFile" left-label="页面 / 图层">
+  <WorkspaceLayout :active="active" :embedded="embedded" :title="documentFile?.name || '文档编辑工作台'" :subtitle="fileSummary" :has-file="hasFile" left-label="页面 / 图层">
     <template #history><button class="text-button" :disabled="!active || isBusy || !history.canUndo.value" @click="undo">撤销</button><button class="text-button" :disabled="!active || isBusy || !history.canRedo.value" @click="redo">重做</button></template>
     <template #actions>
       <button v-if="hasFile" class="tonal-button secondary-action" :disabled="!active || isBusy || !history.canUndo.value" @click="undo">撤销</button>
@@ -834,7 +947,7 @@ defineExpose({ isBusy, load: loadFile, snapshot: () => fileKind.value === 'pdf' 
       </fieldset>
     </template>
 
-    <div v-if="!hasFile" class="empty-workspace"><FileDropZone compact title="选择 PDF 或图片" @file="loadFile($event).catch(reason => showError(reason.message))" @error="showError" /></div>
+    <div v-if="!hasFile" class="empty-workspace"><FileDropZone :active="active" compact title="选择 PDF 或图片" @file="loadFile($event).catch(reason => showError(reason.message))" @error="showError" /></div>
     <div v-else ref="viewportEl" class="document-viewport" @wheel="handleWheel" @dragover.prevent @drop.prevent="handleDrop" @pointerdown="startPointer" @pointermove="movePointer" @pointerup="endPointer" @pointercancel="endPointer">
       <div class="document-stage" :class="`tool-${activeTool}`" :style="stageStyle">
         <canvas ref="canvas" aria-label="文档编辑画布"></canvas>
