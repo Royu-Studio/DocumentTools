@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { createWorker } from "tesseract.js";
 import { saveAs } from "file-saver";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -25,7 +25,9 @@ const selectedFile = ref(null);
 const selectedLanguage = ref("chi_sim+eng");
 const statusText = ref("请选择文件");
 const resultText = ref(EMPTY_RESULT_TEXT);
-const isBusy = ref(false);
+const recognizing = ref(false);
+const loadingPreview = ref(false);
+const isBusy = computed(() => recognizing.value || loadingPreview.value);
 const previewType = ref("empty");
 const previewPages = ref([]);
 const currentPreviewPage = ref(0);
@@ -35,8 +37,44 @@ const imagePreviewUrl = ref("");
 const pdfPreviewUrls = ref([]);
 const previewImageEl = ref(null);
 const workspace = useWorkspaceStore();
-const activeWorker = ref(null);
+const activeWorker = shallowRef(null);
 const destroyed = ref(false);
+let previewGeneration = 0;
+let recognitionGeneration = 0;
+const pdfLoadingTasks = new Set();
+const pdfRenderTasks = new Set();
+const previewCanvases = new Set();
+const destroyedPdfTasks = new WeakMap();
+const terminatedWorkers = new WeakMap();
+const pendingRecognitionWaits = new Set();
+
+function cancelledError() { return new DOMException("文件处理已取消", "AbortError"); }
+function isCurrentPreview(generation) { return !destroyed.value && generation === previewGeneration; }
+function assertPreview(generation) { if (!isCurrentPreview(generation)) throw cancelledError(); }
+function isCurrentRecognition(generation) { return !destroyed.value && generation === recognitionGeneration; }
+function assertRecognition(generation) { if (!isCurrentRecognition(generation)) throw cancelledError(); }
+function destroyPdfTask(task) {
+  if (!destroyedPdfTasks.has(task)) destroyedPdfTasks.set(task, Promise.resolve().then(() => task.destroy()).catch(() => {}));
+  return destroyedPdfTasks.get(task);
+}
+function terminateWorker(worker) {
+  if (!worker) return Promise.resolve();
+  if (activeWorker.value === worker) activeWorker.value = null;
+  if (!terminatedWorkers.has(worker)) terminatedWorkers.set(worker, Promise.resolve().then(() => worker.terminate()).catch(() => {}));
+  return terminatedWorkers.get(worker);
+}
+function waitForRecognition(promise, generation) {
+  return new Promise((resolve, reject) => {
+    const cancel = () => { pendingRecognitionWaits.delete(cancel); reject(cancelledError()); };
+    pendingRecognitionWaits.add(cancel);
+    Promise.resolve(promise).then(value => {
+      pendingRecognitionWaits.delete(cancel);
+      if (isCurrentRecognition(generation)) resolve(value);
+      else reject(cancelledError());
+    }, error => { pendingRecognitionWaits.delete(cancel); reject(error); });
+    if (!isCurrentRecognition(generation)) cancel();
+  });
+}
 
 const fileMeta = computed(() => {
   if (!selectedFile.value) {
@@ -70,10 +108,13 @@ const selectionBoxStyle = computed(() => {
 async function handleFileChange(event) {
   const [file] = event.target.files ?? [];
   event.target.value = "";
-  await loadSelectedFile(file);
+  if (props.active && !destroyed.value) {
+    try { await loadSelectedFile(file); } catch (error) { if (error.name !== "AbortError") throw error; }
+  }
 }
 
 async function loadSelectedFile(file) {
+  if (destroyed.value) throw cancelledError();
   const validation = validateFile(file, { allow: ["pdf", "image"] });
   if (file && !validation.valid) {
     statusText.value = "文件不受支持";
@@ -86,6 +127,7 @@ async function loadSelectedFile(file) {
     resultText.value = "OCR 支持 PNG、JPG、WEBP 或 PDF 文件。";
     return;
   }
+  const generation = ++previewGeneration;
   cleanupPreview();
 
   selectedFile.value = file ?? null;
@@ -100,14 +142,15 @@ async function loadSelectedFile(file) {
   }
 
   statusText.value = "文件已加载，正在准备预览";
+  loadingPreview.value = true;
 
   if (isPdfFile(selectedFile.value)) {
     previewType.value = "pdf-loading";
   }
 
   try {
-    const pages = await buildPreviewPages(selectedFile.value);
-    if (destroyed.value) return;
+    const pages = await buildPreviewPages(file, generation);
+    assertPreview(generation);
     previewPages.value = pages;
 
     if (pages.length === 0) {
@@ -116,129 +159,155 @@ async function loadSelectedFile(file) {
       return;
     }
 
-    previewType.value = selectedFile.value && isPdfFile(selectedFile.value) ? "pdf" : "image";
+    previewType.value = isPdfFile(file) ? "pdf" : "image";
     statusText.value = "文件已加载，等待识别";
-    workspace.setCurrentFileName(selectedFile.value.name);
+    if (!props.embedded && props.active) workspace.setCurrentFileName(file.name);
   } catch (error) {
+    if (!isCurrentPreview(generation)) throw cancelledError();
+    cleanupPreview();
     console.error("OCR 预览生成失败", error);
     previewType.value = "empty";
     statusText.value = "预览生成失败";
     resultText.value = `无法读取文件：${error.message}`;
-  }
+  } finally { if (isCurrentPreview(generation)) loadingPreview.value = false; }
 }
 
 async function recognizeFile() {
-  if (previewPages.value.length === 0 || isBusy.value) {
+  if (!props.active || destroyed.value || previewPages.value.length === 0 || isBusy.value) {
     return;
   }
 
-  isBusy.value = true;
+  const generation = ++recognitionGeneration;
+  const pages = [...previewPages.value];
+  recognizing.value = true;
   statusText.value = "正在准备文字识别...";
   resultText.value = "";
 
   let worker = null;
 
   try {
-    worker = await createOcrWorker();
-    activeWorker.value = worker;
+    worker = await createOcrWorker(generation);
+    assertRecognition(generation);
 
     const outputs = [];
-    for (let index = 0; index < previewPages.value.length; index += 1) {
-      const pageLabel = `第 ${index + 1}/${previewPages.value.length} 页`;
+    for (let index = 0; index < pages.length; index += 1) {
+      assertRecognition(generation);
+      const pageLabel = `第 ${index + 1}/${pages.length} 页`;
       statusText.value = `正在预处理${pageLabel}...`;
-      const bestData = await recognizeBestVariant(worker, previewPages.value[index].canvas, pageLabel);
-      outputs.push(formatPageResult(index + 1, buildStructuredText(bestData, previewPages.value[index].canvas)));
+      const bestData = await recognizeBestVariant(worker, pages[index].canvas, pageLabel, generation);
+      assertRecognition(generation);
+      outputs.push(formatPageResult(index + 1, buildStructuredText(bestData, pages[index].canvas)));
     }
 
     resultText.value = outputs.join("\n\n");
-    statusText.value = `识别完成，共 ${previewPages.value.length} 页`;
+    statusText.value = `识别完成，共 ${pages.length} 页`;
   } catch (error) {
+    if (!isCurrentRecognition(generation)) return;
     console.error(error);
     statusText.value = "识别失败";
     resultText.value = `发生错误：${error.message}`;
   } finally {
-    if (worker) {
-      await worker.terminate();
-    }
-    activeWorker.value = null;
-
-    isBusy.value = false;
+    await terminateWorker(worker);
+    if (isCurrentRecognition(generation)) recognizing.value = false;
   }
 }
 
 async function recognizeSelection() {
   const page = currentPreview.value;
   const rect = getStoredSelectionForCurrentPage();
-  if (!page || !rect || isBusy.value) {
+  if (!props.active || destroyed.value || !page || !rect || isBusy.value) {
     return;
   }
 
-  isBusy.value = true;
+  const generation = ++recognitionGeneration;
+  const pageNumber = currentPreviewPage.value + 1;
+  recognizing.value = true;
   statusText.value = `正在识别框选区域（第 ${currentPreviewPage.value + 1} 页）...`;
 
   let worker = null;
+  let croppedCanvas;
 
   try {
-    const croppedCanvas = cropCanvas(page.canvas, rect);
-    worker = await createOcrWorker();
-    activeWorker.value = worker;
-    const bestData = await recognizeBestVariant(worker, croppedCanvas, `第 ${currentPreviewPage.value + 1} 页框选区域`);
-    const manualText = formatManualSelectionResult(currentPreviewPage.value + 1, buildStructuredText(bestData, croppedCanvas));
+    croppedCanvas = cropCanvas(page.canvas, rect);
+    worker = await createOcrWorker(generation);
+    assertRecognition(generation);
+    const bestData = await recognizeBestVariant(worker, croppedCanvas, `第 ${pageNumber} 页框选区域`, generation);
+    assertRecognition(generation);
+    const manualText = formatManualSelectionResult(pageNumber, buildStructuredText(bestData, croppedCanvas));
 
     resultText.value = resultText.value && resultText.value !== EMPTY_RESULT_TEXT
       ? `${resultText.value}\n\n${manualText}`
       : manualText;
-    statusText.value = `框选识别完成（第 ${currentPreviewPage.value + 1} 页）`;
+    statusText.value = `框选识别完成（第 ${pageNumber} 页）`;
   } catch (error) {
+    if (!isCurrentRecognition(generation)) return;
     console.error(error);
     statusText.value = "框选识别失败";
     resultText.value = `发生错误：${error.message}`;
   } finally {
-    if (worker) {
-      await worker.terminate();
-    }
-    activeWorker.value = null;
-
-    isBusy.value = false;
+    if (croppedCanvas) croppedCanvas.width = croppedCanvas.height = 1;
+    await terminateWorker(worker);
+    if (isCurrentRecognition(generation)) recognizing.value = false;
   }
 }
 
-async function createOcrWorker() {
-  const worker = await createWorker(selectedLanguage.value, 1, {
+async function createOcrWorker(generation) {
+  const creation = createWorker(selectedLanguage.value, 1, {
     workerPath: `${ocrAssetsBase}/worker.min.js`,
     corePath: `${ocrAssetsBase}/core`,
     langPath: `${ocrAssetsBase}/lang-data`,
     gzip: true,
     logger: (message) => {
-      if (message.status === "recognizing text") {
+      if (isCurrentRecognition(generation) && message.status === "recognizing text") {
         statusText.value = `正在识别：${Math.round(message.progress * 100)}%`;
       }
     }
+  }).then(worker => {
+    // Worker creation itself has no cancellation API. Own the returned worker
+    // immediately so even cancellation between promise callbacks releases it.
+    if (isCurrentRecognition(generation)) activeWorker.value = worker;
+    else void terminateWorker(worker);
+    return worker;
   });
+  const worker = await waitForRecognition(creation, generation);
 
-  await worker.setParameters({
-    preserve_interword_spaces: "1",
-    tessedit_pageseg_mode: "3",
-    user_defined_dpi: "300"
-  });
-
-  return worker;
+  try {
+    assertRecognition(generation);
+    activeWorker.value = worker;
+    await waitForRecognition(worker.setParameters({
+      preserve_interword_spaces: "1",
+      tessedit_pageseg_mode: "3",
+      user_defined_dpi: "300"
+    }), generation);
+    assertRecognition(generation);
+    return worker;
+  } catch (error) {
+    await terminateWorker(worker);
+    throw error;
+  }
 }
 
-async function recognizeBestVariant(worker, sourceCanvas, pageLabel) {
+async function recognizeBestVariant(worker, sourceCanvas, pageLabel, generation) {
+  assertRecognition(generation);
   const primaryCanvas = preprocessCanvasForOcr(sourceCanvas, false);
-  statusText.value = `正在识别${pageLabel}...`;
-  const primaryResult = await worker.recognize(primaryCanvas);
-  let bestData = primaryResult.data;
-
-  if (shouldRetryWithInversion(primaryResult.data, sourceCanvas)) {
-    const invertedCanvas = preprocessCanvasForOcr(sourceCanvas, true);
-    statusText.value = `正在增强识别${pageLabel}...`;
-    const invertedResult = await worker.recognize(invertedCanvas);
-    bestData = pickBetterResult(primaryResult.data, invertedResult.data);
+  let invertedCanvas;
+  try {
+    statusText.value = `正在识别${pageLabel}...`;
+    const primaryResult = await waitForRecognition(worker.recognize(primaryCanvas), generation);
+    assertRecognition(generation);
+    let bestData = primaryResult.data;
+    if (shouldRetryWithInversion(primaryResult.data, sourceCanvas)) {
+      invertedCanvas = preprocessCanvasForOcr(sourceCanvas, true);
+      statusText.value = `正在增强识别${pageLabel}...`;
+      const invertedResult = await waitForRecognition(worker.recognize(invertedCanvas), generation);
+      assertRecognition(generation);
+      bestData = pickBetterResult(primaryResult.data, invertedResult.data);
+    }
+    return bestData;
+  } finally {
+    primaryCanvas.width = primaryCanvas.height = 1;
+    if (invertedCanvas) invertedCanvas.width = invertedCanvas.height = 1;
   }
-
-  return bestData;
 }
 
 function shouldRetryWithInversion(data, sourceCanvas) {
@@ -258,13 +327,15 @@ function scoreOcrResult(data) {
   return confidence * 2 + Math.min(textLength, 400) * 0.08;
 }
 
-async function buildPreviewPages(file) {
+async function buildPreviewPages(file, generation) {
   if (isPdfFile(file)) {
-    const canvases = await extractPdfPages(file);
+    const canvases = await extractPdfPages(file, generation);
+    assertPreview(generation);
     return canvases.map((canvas, index) => createPreviewPage(canvas, index));
   }
 
-  const canvas = await imageFileToCanvas(file);
+  const canvas = await imageFileToCanvas(file, generation);
+  assertPreview(generation);
   return [createPreviewPage(canvas, 0)];
 }
 
@@ -280,52 +351,69 @@ function createPreviewPage(canvas, index) {
   };
 }
 
-async function imageFileToCanvas(file) {
+async function imageFileToCanvas(file, generation) {
   const bitmap = await createImageBitmap(file);
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d");
-
-  if (!context) {
-    throw new Error("无法创建图片 OCR 画布");
-  }
-
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  context.drawImage(bitmap, 0, 0);
-  bitmap.close?.();
-  return canvas;
-}
-
-async function extractPdfPages(file) {
-  const pdf = await loadPdfDocument(file);
-  const pages = [];
-
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 2 });
+  try {
+    assertPreview(generation);
     const canvas = document.createElement("canvas");
+    previewCanvases.add(canvas);
     const context = canvas.getContext("2d");
-
-    if (!context) {
-      throw new Error("无法创建 PDF OCR 画布");
-    }
-
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({ canvasContext: context, viewport }).promise;
-    pages.push(canvas);
-  }
-
-  return pages;
+    if (!context) throw new Error("无法创建图片 OCR 画布");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    context.drawImage(bitmap, 0, 0);
+    return canvas;
+  } finally { bitmap.close?.(); }
 }
 
-async function loadPdfDocument(file) {
+async function extractPdfPages(file, generation) {
+  const { pdf, task } = await loadPdfDocument(file, generation);
+  const pages = [];
+  try {
+    assertPreview(generation);
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      assertPreview(generation);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = document.createElement("canvas");
+      previewCanvases.add(canvas);
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("无法创建 PDF OCR 画布");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const render = page.render({ canvasContext: context, viewport });
+      pdfRenderTasks.add(render);
+      try {
+        await render.promise;
+        assertPreview(generation);
+      } finally { pdfRenderTasks.delete(render); }
+      pages.push(canvas);
+    }
+    return pages;
+  } finally {
+    await destroyPdfTask(task);
+    pdfLoadingTasks.delete(task);
+  }
+}
+
+async function loadPdfDocument(file, generation) {
   const buffer = await file.arrayBuffer();
-  return pdfjsLib.getDocument({ data: buffer }).promise;
+  assertPreview(generation);
+  const task = pdfjsLib.getDocument({ data: buffer });
+  pdfLoadingTasks.add(task);
+  try {
+    const pdf = await task.promise;
+    assertPreview(generation);
+    return { pdf, task };
+  } catch (error) {
+    await destroyPdfTask(task);
+    pdfLoadingTasks.delete(task);
+    throw error;
+  }
 }
 
 function startSelection(event) {
-  if (!selectionMode.value || !currentPreview.value || isBusy.value) {
+  if (!props.active || destroyed.value || !selectionMode.value || !currentPreview.value || isBusy.value) {
     return;
   }
 
@@ -347,7 +435,7 @@ function startSelection(event) {
 const selectionMode = ref(false);
 
 function updateSelection(event) {
-  if (!dragSelection.value) {
+  if (!props.active || destroyed.value || !dragSelection.value) {
     return;
   }
 
@@ -364,7 +452,7 @@ function updateSelection(event) {
 }
 
 function finishSelection() {
-  if (!dragSelection.value) {
+  if (!props.active || destroyed.value || !dragSelection.value) {
     return;
   }
 
@@ -397,6 +485,7 @@ function clearSelection() {
 }
 
 function switchPreviewPage(index) {
+  if (!props.active || destroyed.value) return;
   currentPreviewPage.value = index;
   dragSelection.value = null;
 }
@@ -931,6 +1020,18 @@ function formatFileSize(bytes) {
 }
 
 function cleanupPreview() {
+  recognitionGeneration++;
+  recognizing.value = false;
+  loadingPreview.value = false;
+  // Tesseract terminate() does not reject outstanding recognition promises.
+  for (const cancel of pendingRecognitionWaits) cancel();
+  void terminateWorker(activeWorker.value);
+  for (const render of pdfRenderTasks) render.cancel();
+  pdfRenderTasks.clear();
+  for (const task of pdfLoadingTasks) void destroyPdfTask(task);
+  pdfLoadingTasks.clear();
+  for (const canvas of previewCanvases) canvas.width = canvas.height = 1;
+  previewCanvases.clear();
   if (imagePreviewUrl.value) {
     URL.revokeObjectURL(imagePreviewUrl.value);
     imagePreviewUrl.value = "";
@@ -947,25 +1048,26 @@ function cleanupPreview() {
 }
 
 async function copyResult() {
-  if (!resultText.value || resultText.value === EMPTY_RESULT_TEXT) return;
+  if (!props.active || destroyed.value || !resultText.value || resultText.value === EMPTY_RESULT_TEXT) return;
+  const generation = previewGeneration;
   try {
     await navigator.clipboard.writeText(resultText.value);
-    statusText.value = "识别结果已复制";
+    if (isCurrentPreview(generation)) statusText.value = "识别结果已复制";
   } catch {
-    statusText.value = "复制失败，请手动选择文本";
+    if (isCurrentPreview(generation)) statusText.value = "复制失败，请手动选择文本";
   }
 }
 
 function downloadResult() {
-  if (!resultText.value || resultText.value === EMPTY_RESULT_TEXT) return;
+  if (!props.active || destroyed.value || !resultText.value || resultText.value === EMPTY_RESULT_TEXT) return;
   saveAs(new Blob([resultText.value], { type: "text/plain;charset=utf-8" }), safeDownloadName(selectedFile.value?.name, "识别结果", "txt"));
   statusText.value = "识别结果已下载";
 }
 
 function handlePaste(event) {
-  if (!props.active || props.embedded) return;
+  if (!props.active || props.embedded || destroyed.value || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName) || event.target?.isContentEditable) return;
   const file = [...(event.clipboardData?.files ?? [])].find((item) => item.type.startsWith("image/"));
-  if (file && !isBusy.value) loadSelectedFile(file);
+  if (file && !isBusy.value) void loadSelectedFile(file).catch(() => {});
 }
 
 function isPdfFile(file) {
@@ -978,18 +1080,21 @@ function clamp(value, min, max) {
 
 onMounted(async () => {
   window.addEventListener("paste", handlePaste);
-  const staged = workspace.takeFile("ocr");
-  if (staged) await loadSelectedFile(staged);
+  const staged = !props.embedded && props.active && workspace.takeFile("ocr");
+  if (staged) try { await loadSelectedFile(staged); } catch { /* Closed during preview. */ }
 });
 
 onBeforeUnmount(() => {
   destroyed.value = true;
+  previewGeneration++;
   window.removeEventListener("paste", handlePaste);
-  activeWorker.value?.terminate?.();
-  activeWorker.value = null;
   cleanupPreview();
-  workspace.setCurrentFileName("");
+  if (!props.embedded && props.active && workspace.currentFileName === selectedFile.value?.name) workspace.setCurrentFileName("");
 });
+watch(() => props.active, active => {
+  if (!active) cancelSelection();
+  else if (!props.embedded && selectedFile.value) workspace.setCurrentFileName(selectedFile.value.name);
+}, { flush: 'sync' });
 defineExpose({ load: async file => { await loadSelectedFile(file); if (!previewPages.value.length) throw new Error(statusText.value); }, isBusy });
 </script>
 

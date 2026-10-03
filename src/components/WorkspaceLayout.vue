@@ -1,9 +1,10 @@
 <script setup>
-import { nextTick, onDeactivated, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 
-defineProps({
+const props = defineProps({
+  active: { type: Boolean, default: true },
   title: { type: String, required: true },
   subtitle: { type: String, default: '' },
   hasFile: Boolean,
@@ -18,22 +19,31 @@ const leftClose = ref(null)
 const rightClose = ref(null)
 const sheet = ref(null)
 const router = useRouter()
+let sheetRequest = 0
 
 async function openSheet(side) {
+  if (!props.active) return
+  const request = ++sheetRequest
   if (side === 'left') showLeft.value = true
   else showRight.value = true
   await nextTick()
+  if (!props.active || request !== sheetRequest) return
   sheet.value?.showModal()
   ;(side === 'left' ? leftClose.value : rightClose.value)?.focus()
 }
 
-function closeSheet(side) {
+function closeSheet(side, restoreFocus = true) {
+  const request = ++sheetRequest
   sheet.value?.close()
-  if (side === 'left') showLeft.value = false
-  else showRight.value = false
-  nextTick(() => (side === 'left' ? leftTrigger.value : rightTrigger.value)?.focus())
+  showLeft.value = false
+  showRight.value = false
+  if (restoreFocus) nextTick(() => {
+    if (props.active && request === sheetRequest) (side === 'left' ? leftTrigger.value : rightTrigger.value)?.focus()
+  })
 }
-onDeactivated(() => { if (showLeft.value || showRight.value) closeSheet(showLeft.value ? 'left' : 'right') })
+watch(() => props.active, active => { if (!active) closeSheet(null, false) }, { flush: 'sync' })
+onDeactivated(() => closeSheet(null, false))
+onBeforeUnmount(() => closeSheet(null, false))
 
 </script>
 

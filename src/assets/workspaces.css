@@ -1,0 +1,29 @@
+.workspace-app { --workspace-bar-height: 0px; }
+.workspace-app.has-workspace-tabs { --workspace-bar-height: 54px; }
+.workspace-tabbar { height: var(--workspace-bar-height); display: flex; gap: 6px; align-items: stretch; position: sticky; top: 0; z-index: 30; padding: 5px 10px 0; background: var(--md-surface-container); border-bottom: 1px solid var(--md-outline-variant); }
+.workspace-tabs { display: flex; flex: 1; min-width: 0; overflow-x: auto; gap: 5px; scrollbar-width: thin; }
+.workspace-tab { display: flex; flex-shrink: 0; align-items: center; border: 1px solid var(--md-outline-variant); border-bottom: 0; border-radius: 10px 10px 0 0; background: var(--md-surface-container); max-width: 300px; }
+.workspace-tab.selected { background: var(--md-surface); border-top: 3px solid var(--md-primary); }
+.workspace-tab button { border: 0; background: transparent; color: inherit; cursor: pointer; min-height: 42px; }
+.workspace-tab [role=tab] { display: flex; gap: 8px; align-items: center; padding: 0 8px 0 12px; min-width: 80px; max-width: 218px; font-size: 12px; }
+.workspace-tab [role=tab] span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab [role=tab] svg { flex-shrink: 0; }
+.workspace-tab-action { width: 30px; padding: 0; flex-shrink: 0; font-size: 17px; }
+.workspace-tab button:hover, .workspace-add:hover, .workspace-home:hover { background: var(--md-primary-container); }
+.workspace-home, .workspace-add { border: 0; color: var(--md-on-surface); background: transparent; min-width: 42px; cursor: pointer; flex-shrink: 0; border-radius: 8px; }
+.workspace-home { display: grid; place-items: center; }
+.workspace-add { padding: 0 12px; }
+.workspace-chooser { position: absolute; right: 12px; top: 54px; width: min(290px, calc(100vw - 24px)); padding: 16px; display: grid; gap: 8px; border: 1px solid var(--md-outline-variant); border-radius: 14px; background: var(--md-surface); box-shadow: 0 12px 40px #0003; }
+.workspace-chooser button { display: flex; align-items: center; gap: 10px; padding: 12px; border: 0; border-radius: 8px; background: var(--md-surface-container); color: var(--md-on-surface); cursor: pointer; text-align: left; }
+.workspace-chooser small { color: var(--md-on-surface-variant); }
+.workspace-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; background: var(--md-primary-container); color: var(--md-on-primary-container); font-size: 13px; }
+.workspace-notice button { background: transparent; border: 0; font-size: 22px; cursor: pointer; }
+.workspace-rename { width: min(420px,calc(100vw - 24px)); margin: auto; padding: 24px; border: 1px solid var(--md-outline-variant); border-radius: 18px; background: var(--md-surface); color: var(--md-on-surface); }
+.workspace-rename::backdrop { background: #0006; }
+.workspace-rename h2 { font-size: 20px; margin: 0 0 20px; }
+.workspace-rename label { display: grid; gap: 8px; }
+.workspace-rename input { min-height: 44px; padding: 10px; border: 1px solid var(--md-outline-variant); border-radius: 8px; background: var(--md-surface-container); color: inherit; }
+.workspace-rename form > div { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.workspace-instance .studio-shell { height: calc(100dvh - var(--workspace-bar-height)); }
+.workspace-instance .formatter-page, .workspace-app > .toolbox-home { min-height: calc(100dvh - var(--workspace-bar-height)); }
+@media(max-width:600px) { .workspace-tabbar { padding-inline: 4px; gap: 2px; } .workspace-add { padding: 0 7px; } .workspace-add span { display:none; } .workspace-tab { max-width: 240px; } .workspace-tab [role=tab] { max-width: 156px; } .workspace-tab-action { width: 36px; } }
