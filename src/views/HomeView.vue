@@ -1,202 +1,81 @@
-
-<template>
-  <div class="home">
-
-
-    <!-- 应用网格区域 -->
-    <div class="app-grid-section">
-      <h3 class="section-title">应用</h3>
-      <van-grid :column-num="3" :border="false" clickable>
-        <van-grid-item
-            v-for="app in apps"
-            :key="app.id"
-            :icon="app.icon"
-            :text="app.name"
-            @click="handleAppClick(app)"
-        >
-          <template #icon>
-            <div class="app-icon-wrapper">
-              <van-icon :name="app.icon" size="24" />
-            </div>
-          </template>
-        </van-grid-item>
-      </van-grid>
-    </div>
-
-    <!-- 推荐应用区域 -->
-<!--    <div class="recommend-section">-->
-<!--      <h3 class="section-title">推荐应用</h3>-->
-<!--      <div class="recommend-grid">-->
-<!--        <div-->
-<!--            v-for="recommend in recommends"-->
-<!--            :key="recommend.id"-->
-<!--            class="recommend-card"-->
-<!--            @click="handleRecommendClick(recommend)"-->
-<!--        >-->
-<!--          <div class="recommend-icon">-->
-<!--            <van-icon :name="recommend.icon" size="20" />-->
-<!--          </div>-->
-<!--          <div class="recommend-name">{{ recommend.name }}</div>-->
-<!--        </div>-->
-<!--      </div>-->
-<!--    </div>-->
-
-    <!-- 底部导航 -->
-<!--    <van-tabbar v-model="activeTab" fixed placeholder>-->
-<!--      <van-tabbar-item name="home" icon="home-o">首页</van-tabbar-item>-->
-<!--      <van-tabbar-item name="apps" icon="apps-o">应用</van-tabbar-item>-->
-<!--      <van-tabbar-item name="message" icon="chat-o" dot>消息</van-tabbar-item>-->
-<!--      <van-tabbar-item name="profile" icon="user-o">我的</van-tabbar-item>-->
-<!--    </van-tabbar>-->
-  </div>
-</template>
-
 <script setup>
-import { ref, reactive } from 'vue'
-import router from "@/router/index.js";
+import { ref } from 'vue'
+import { useRouter } from 'vue-router'
+import AppIcon from '@/components/AppIcon.vue'
+import FileDropZone from '@/components/FileDropZone.vue'
+import { useWorkspaceStore } from '@/stores/workspace.js'
 
-const emits = defineEmits(['updateTitle']);
-const activeTab = ref('home')
+const router = useRouter()
+const workspace = useWorkspaceStore()
+const error = ref('')
 
-// 应用数据
-const apps = reactive([
-  { id: 1, name: 'PDF水印工具', icon: 'newspaper-o', color: '#1989fa', path: "/pdf" },
-  { id: 2, name: '图片文字工具', icon: 'photo-o', color: '#07c160', path: "/image_tool" },
-/*  { id: 2, name: '相册', icon: 'photo-o', color: '#07c160' },
-  { id: 3, name: '音乐', icon: 'music-o', color: '#ff976a' },
-  { id: 4, name: '视频', icon: 'video-o', color: '#ee0a24' },
-  { id: 5, name: '购物', icon: 'shopping-cart-o', color: '#ff6034' },
-  { id: 6, name: '游戏', icon: 'play-circle-o', color: '#7232dd' }*/
-])
-
-// 推荐应用数据
-const recommends = reactive([
-  { id: 1, name: '天气', icon: 'underway-o', color: '#ffd700', path: '' },
-  { id: 2, name: '地图', icon: 'location-o', color: '#34c759' },
-  { id: 3, name: '支付', icon: 'balance-o', color: '#00bfff' },
-  { id: 4, name: '健康', icon: 'medal-o', color: '#ff6b6b' },
-  { id: 5, name: '学习', icon: 'bookmark-o', color: '#9c27b0' },
-  { id: 6, name: '工作', icon: 'bag-o', color: '#607d8b' }
-])
-
-// 事件处理函数
-const handleAppClick = (app) => {
-  if (app.path) {
-    if (app.name) {
-      emits("updateTitle", app.name);
-    }
-    router.push(app.path)
-  }
+async function openFile(file, kind) {
+  error.value = ''
+  const mode = kind === 'pdf' ? 'pdf' : 'image'
+  workspace.stageFile(file, mode)
+  localStorage.setItem('document-tools-last-mode', mode)
+  await router.push(mode === 'pdf' ? '/pdf' : '/image_tool')
 }
 
-const handleRecommendClick = (recommend) => {
-  showToast(`查看${recommend.name}`)
-}
-
-const handleSearch = () => {
-  showToast('搜索功能')
-}
-
-const handleSettings = () => {
-  showToast('设置功能')
+function openOcr() {
+  workspace.setCurrentFileName('')
+  localStorage.setItem('document-tools-last-mode', 'ocr')
+  router.push('/ocr')
 }
 </script>
 
+<template>
+  <main class="home-page">
+    <section class="home-hero">
+      <div class="home-intro">
+        <h1>一个入口，处理 <em>PDF</em> 与 <em>图片</em></h1>
+        <p>盖章、编辑、识别，轻松高效，隐私安全。</p>
+      </div>
+      <svg class="hero-art" viewBox="0 0 310 170" aria-hidden="true">
+        <defs><linearGradient id="paper" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#fff"/><stop offset="1" stop-color="#edf3ff"/></linearGradient><linearGradient id="stamp" x1="0" x2="1"><stop stop-color="#8db7ff"/><stop offset="1" stop-color="#315fc7"/></linearGradient></defs>
+        <path d="M22 116 113 50l62 79H45z" fill="#edf3ff"/><rect x="82" y="12" width="111" height="138" rx="10" transform="rotate(-8 82 12)" fill="url(#paper)" stroke="#e4ebf7"/><path d="m101 43 62-9m-58 31 66-9m-61 31 51-7" stroke="#b7cff8" stroke-width="7" stroke-linecap="round"/><rect x="105" y="91" width="65" height="42" rx="6" fill="#7ba7f8" transform="rotate(-8 105 91)"/><path d="m111 124 17-22 13 10 12-18 21 25" fill="#eaf2ff"/><ellipse cx="229" cy="136" rx="57" ry="12" fill="#dfe9fb"/><path d="M219 84h31l9 37h-49z" fill="url(#stamp)"/><path d="M229 84c-1-17 1-30 12-35 15-7 31 7 24 22-4 9-11 10-15 14z" fill="url(#stamp)"/><rect x="195" y="118" width="79" height="19" rx="7" fill="#315fc7"/></svg>
+    </section>
+
+    <FileDropZone title="拖拽 PDF 或图片到此处，或" hint="支持 PDF、PNG、JPG、WEBP 等格式（单个文件 ≤ 200MB）" @file="openFile" @error="error = $event" />
+    <p v-if="error" class="status-message error" role="alert">{{ error }}</p>
+
+    <section class="capabilities" aria-label="工具能力">
+      <button class="capability" type="button" @click="router.push('/pdf')">
+        <span class="capability-icon stamp-icon">▣</span>
+        <span><strong>PDF 盖章</strong><small>添加印章、签名、日期戳<br>批量盖章，位置自定义</small></span><AppIcon class="enter-icon" name="arrow-right" :size="21" />
+      </button>
+      <button class="capability" type="button" @click="router.push('/image_tool')">
+        <span class="capability-icon">▧</span>
+        <span><strong>图片编辑</strong><small>涂抹、文字、裁剪、取色<br>轻松编辑与标注图片</small></span><AppIcon class="enter-icon" name="arrow-right" :size="21" />
+      </button>
+      <button class="capability" type="button" @click="openOcr">
+        <span class="capability-icon">▤</span>
+        <span><strong>离线文字识别</strong><small>从图片或 PDF 中提取文字<br>支持多语言 OCR</small></span><AppIcon class="enter-icon" name="arrow-right" :size="21" />
+      </button>
+    </section>
+  </main>
+</template>
+
 <style scoped>
-.home {
-  padding-bottom: 50px;
-  min-height: 80vh;
-}
-
-.app-grid-section,
-.recommend-section {
-  padding: 16px;
-  background: white;
-  margin: 8px;
-  border-radius: 12px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
-}
-
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #323233;
-  margin-bottom: 12px;
-}
-
-.app-icon-wrapper {
-  width: 48px;
-  height: 48px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 8px;
-}
-
-.app-icon-wrapper .van-icon {
-  color: white;
-}
-
-.recommend-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}
-
-.recommend-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 12px 8px;
-  background: #f8f9fa;
-  border-radius: 12px;
-  transition: all 0.3s ease;
-}
-
-.recommend-card:active {
-  background: #e8f4ff;
-  transform: scale(0.95);
-}
-
-.recommend-icon {
-  width: 40px;
-  height: 40px;
-  background: white;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 6px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-}
-
-.recommend-name {
-  font-size: 12px;
-  color: #646566;
-  text-align: center;
-}
-
-.van-nav-bar {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-.van-nav-bar :deep(.van-nav-bar__title) {
-  color: white;
-  font-weight: 600;
-}
-
-.van-nav-bar :deep(.van-icon) {
-  color: white;
-}
-
-.van-grid-item :deep(.van-grid-item__text) {
-  font-size: 12px;
-  color: #323233;
-}
-
-.van-tabbar {
-  border-top: 1px solid #ebedf0;
-}
+.home-page { width: min(1100px, calc(100% - 40px)); margin: 0 auto; padding: 58px 0 42px; }
+.home-hero { position: relative; min-height: 180px; display: flex; align-items: center; padding: 0 340px 20px 72px; }
+.home-intro { text-align: left; }
+h1 { margin: 0; white-space: nowrap; font-size: clamp(31px, 3.3vw, 48px); line-height: 1.16; letter-spacing: -.035em; }
+h1 em { color: var(--md-primary); font-style: normal; }
+.home-intro p { margin: 16px 0 0; color: var(--md-on-surface-variant); font-size: 16px; letter-spacing: .04em; }
+.hero-art { position: absolute; top: -14px; right: 48px; width: 300px; height: 170px; filter: drop-shadow(0 18px 22px rgba(39, 77, 145, .12)); }
+.status-message { margin-top: 12px; }
+.capabilities { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 24px; }
+.capability { min-height: 148px; padding: 22px; border: 1px solid #e4eaf4; border-radius: 10px; display: grid; grid-template-columns: 54px 1fr auto; align-items: center; gap: 14px; text-align: left; background: var(--md-surface); box-shadow: 0 8px 24px rgba(30, 56, 100, .07); cursor: pointer; transition: .18s ease; }
+.capability:hover { border-color: #b9ccf4; transform: translateY(-2px); box-shadow: 0 12px 28px rgba(30, 56, 100, .12); }
+.capability-icon { flex: 0 0 54px; height: 54px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(135deg,#edf3ff,#d6e4ff); color: #2f63cd; font-size: 28px; font-weight: 800; box-shadow: inset 0 0 0 1px rgba(76,119,208,.08); }
+.capability strong, .capability small { display: block; }
+.capability strong { margin-bottom: 6px; font-size: 17px; }
+.capability small { color: var(--md-on-surface-variant); line-height: 1.55; }
+.enter-icon { color: #26364d; transition: transform .18s ease; }
+.capability:hover .enter-icon { transform: translateX(3px); }
+@media (max-width: 860px) { .home-hero { padding: 20px 0 28px; } .hero-art { opacity: .24; right: 0; } .home-intro { position: relative; z-index: 1; } .capabilities { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .home-page { width: min(100% - 28px, 1100px); padding-top: 28px; } .home-hero { min-height: 145px; align-items: flex-start; } h1 { white-space: normal; font-size: 34px; } .hero-art { width: 220px; top: 25px; } .capability { min-height: 112px; padding: 16px; } }
+:global(:root[data-theme='dark']) .capability { border-color: var(--md-outline-variant); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
+:global(:root[data-theme='dark']) .enter-icon { color: var(--md-on-surface-variant); }
 </style>
